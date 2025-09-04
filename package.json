@@ -1,0 +1,14 @@
+{
+  "name": "mental-math-trainer",
+  "version": "1.0.0",
+  "description": "Mental math trainer with multiplayer rooms via WebSocket",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "nanoid": "^5.0.7",
+    "ws": "^8.18.0"
+  }
+}
