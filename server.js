@@ -2,27 +2,19 @@
 // Run: npm install; npm start (on Windows PowerShell)
 import { WebSocketServer } from 'ws';
 import { customAlphabet } from 'nanoid';
+import fs from 'fs';
+import https from 'https';
 
 const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6); // avoids confusing chars
-
-const PORT = process.env.PORT || 3000;
+// ---- WebSocket Server Setup ----
 let WSS;
-try {
-  WSS = new WebSocketServer({ port: PORT });
-  console.log(`[Server] Mental Math Trainer WebSocket running on ws://localhost:${PORT}`);
-} catch (e) {
-  if(e.code === 'EADDRINUSE') {
-    console.error(`[Server] Port ${PORT} already in use. Close the other process or set PORT env var.`);
-    process.exit(1);
-  } else throw e;
-}
-
+WSS = new WebSocketServer({ port: 3000, host: '127.0.0.1' });
 // ---- Data Structures ----
 const rooms = new Map(); // code -> Room
 
 // Room shape: { code, topics, players: Map<playerId, Player>, hostId, currentQuestion, questionDeadline, settings, inProgress, questionIndex, revealedQuestionId, limit, messages: ChatMessage[] }
 // Player: { id, name, score, correct, questions, streak, ws, lastAnswerQuestionId, lastChatTs }
-// ChatMessage: { id, playerId, name, text, ts }
+// ChatMessage: { id, playerId, name, text, ts: Date.now() }
 
 // Settings
 const QUESTION_TIME_MS = 10000;
@@ -176,85 +168,92 @@ function removePlayerFromRoom(room, playerId){
   }
 }
 
-WSS.on('connection', ws => {
-  const playerId = nanoid();
-  let currentRoom = null;
-  const player = { id:playerId, name:'Player', score:0, correct:0, questions:0, streak:0, ws, lastAnswerQuestionId:null, lastChatTs:0 };
-  send(ws,'hello',{ playerId, supportedTopics:Object.values(TOPIC_MAP).map(t=>({id:t.id,label:t.label})) });
+WSS.on('connection', (ws, req) => {
+    console.log('WS connection from', req.socket.remoteAddress, 'req headers:', req.headers.origin || req.headers.host);
 
-  ws.on('message', raw => {
-    let msg; try { msg = JSON.parse(raw); } catch { return; }
-    const { type } = msg;
-    if(type==='create_room'){
-      const topics = Array.isArray(msg.topics) && msg.topics.length ? msg.topics.filter(t=>TOPIC_MAP[t]) : Object.keys(TOPIC_MAP);
-      currentRoom = createRoom(topics);
-      currentRoom.players.set(player.id, player);
-      currentRoom.hostId = player.id;
-      if(Number.isInteger(msg.limit) && msg.limit>0 && msg.limit<=200){ currentRoom.limit = msg.limit; }
-      send(ws,'room_created',{ code: currentRoom.code, hostId: currentRoom.hostId, topics, limit: currentRoom.limit });
-      broadcast(currentRoom,'leaderboard',{ leaderboard: buildLeaderboard(currentRoom) });
-  systemMessage(currentRoom, `${player.name} created the room.`);
-    }
-    else if(type==='join_room'){
-      const code = (msg.code||'').toUpperCase();
-      const room = rooms.get(code);
-      if(!room){ send(ws,'error',{ message:'Room not found'}); return; }
-      if(room.inProgress){ send(ws,'error',{ message:'Game already in progress'}); return; }
-      currentRoom = room;
-      room.players.set(player.id, player);
-      broadcast(room,'player_join',{ player:{ id:player.id, name:player.name }, leaderboard: buildLeaderboard(room) });
-      send(ws,'joined',{ code:room.code, hostId: room.hostId, topics: room.topics, limit: room.limit });
-      // send recent chat history (last 50)
-      if(room.messages.length){
-        const history = room.messages.slice(-50);
-        send(ws,'chat_history',{ messages: history });
-      }
-  systemMessage(room, `${player.name} joined the room.`);
-    }
-    else if(type==='set_name'){
-      const name = String(msg.name||'Player').substring(0,18).trim() || 'Player';
-      player.name = name;
-      if(currentRoom) broadcast(currentRoom,'leaderboard',{ leaderboard: buildLeaderboard(currentRoom) });
-    }
-    else if(type==='start' && currentRoom){
-      if(player.id !== currentRoom.hostId){ send(ws,'error',{ message:'Only host can start'}); return; }
-      tryStart(currentRoom);
-    }
-    else if(type==='answer' && currentRoom){
-      const q = currentRoom.currentQuestion;
-      if(!q || msg.questionId !== q.id) return;
-      if(player.lastAnswerQuestionId === q.id) return; // already answered
-      const elapsed = Date.now() - q.start;
-      const choice = msg.choice;
-      player.questions++;
-      if(choice === q.answer){
-        player.correct++;
-        player.streak++;
-        player.score += calcPoints(elapsed);
-      } else {
-        player.streak = 0;
-      }
-      player.lastAnswerQuestionId = q.id;
-      broadcast(currentRoom,'leaderboard',{ leaderboard: buildLeaderboard(currentRoom) });
-      // no early reveal; wait for timer to end
-    }
-    else if(type==='chat' && currentRoom){
-      const rawText = (msg.text||'').toString();
-      const text = rawText.replace(/[\r\n\t]/g,' ').trim();
-      if(!text) return; // ignore empty
-      if(text.length > 200) return; // too long
-      const now = Date.now();
-  if(now - player.lastChatTs < 250) return; // relaxed rate limit (250ms)
-      player.lastChatTs = now;
-  const cm = { id: nanoid(), playerId: player.id, name: player.name, text, ts: now };
-  console.log(`[chat] ${currentRoom.code} ${player.name}:`, text);
-  pushChat(currentRoom, cm);
-    }
-  });
+    const playerId = nanoid();
+    let currentRoom = null;
+    const player = { id:playerId, name:'Player', score:0, correct:0, questions:0, streak:0, ws, lastAnswerQuestionId:null, lastChatTs:0 };
+    send(ws,'hello',{ playerId, supportedTopics:Object.values(TOPIC_MAP).map(t=>({id:t.id,label:t.label})) });
 
-  ws.on('close', ()=>{
-    if(currentRoom){ removePlayerFromRoom(currentRoom, player.id); }
-  });
+    ws.on('message', raw => {
+      let msg; try { msg = JSON.parse(raw); } catch { return; }
+      const { type } = msg;
+      if(type==='create_room'){
+        const topics = Array.isArray(msg.topics) && msg.topics.length ? msg.topics.filter(t=>TOPIC_MAP[t]) : Object.keys(TOPIC_MAP);
+        currentRoom = createRoom(topics);
+        currentRoom.players.set(player.id, player);
+        currentRoom.hostId = player.id;
+        if(Number.isInteger(msg.limit) && msg.limit>0 && msg.limit<=200){ currentRoom.limit = msg.limit; }
+        send(ws,'room_created',{ code: currentRoom.code, hostId: currentRoom.hostId, topics, limit: currentRoom.limit });
+        broadcast(currentRoom,'leaderboard',{ leaderboard: buildLeaderboard(currentRoom) });
+    systemMessage(currentRoom, `${player.name} created the room.`);
+      }
+      else if(type==='join_room'){
+        const code = (msg.code||'').toUpperCase();
+        const room = rooms.get(code);
+        if(!room){ send(ws,'error',{ message:'Room not found'}); return; }
+        if(room.inProgress){ send(ws,'error',{ message:'Game already in progress'}); return; }
+        currentRoom = room;
+        room.players.set(player.id, player);
+        broadcast(room,'player_join',{ player:{ id:player.id, name:player.name }, leaderboard: buildLeaderboard(room) });
+        send(ws,'joined',{ code:room.code, hostId: room.hostId, topics: room.topics, limit: room.limit });
+        // send recent chat history (last 50)
+        if(room.messages.length){
+          const history = room.messages.slice(-50);
+          send(ws,'chat_history',{ messages: history });
+        }
+    systemMessage(room, `${player.name} joined the room.`);
+      }
+      else if(type==='set_name'){
+        const name = String(msg.name||'Player').substring(0,18).trim() || 'Player';
+        player.name = name;
+        if(currentRoom) broadcast(currentRoom,'leaderboard',{ leaderboard: buildLeaderboard(currentRoom) });
+      }
+      else if(type==='start' && currentRoom){
+        if(player.id !== currentRoom.hostId){ send(ws,'error',{ message:'Only host can start'}); return; }
+        tryStart(currentRoom);
+      }
+      else if(type==='answer' && currentRoom){
+        const q = currentRoom.currentQuestion;
+        if(!q || msg.questionId !== q.id) return;
+        if(player.lastAnswerQuestionId === q.id) return; // already answered
+        const elapsed = Date.now() - q.start;
+        const choice = msg.choice;
+        player.questions++;
+        if(choice === q.answer){
+          player.correct++;
+          player.streak++;
+          player.score += calcPoints(elapsed);
+        } else {
+          player.streak = 0;
+        }
+        player.lastAnswerQuestionId = q.id;
+        broadcast(currentRoom,'leaderboard',{ leaderboard: buildLeaderboard(currentRoom) });
+        // no early reveal; wait for timer to end
+      }
+      else if(type==='chat' && currentRoom){
+        const rawText = (msg.text||'').toString();
+        const text = rawText.replace(/[\r\n\t]/g,' ').trim();
+        if(!text) return; // ignore empty
+        if(text.length > 200) return; // too long
+        const now = Date.now();
+    if(now - player.lastChatTs < 250) return; // relaxed rate limit (250ms)
+    player.lastChatTs = now;
+    const cm = { id: nanoid(), playerId: player.id, name: player.name, text, ts: now };
+    console.log(`[chat] ${currentRoom.code} ${player.name}:`, text);
+    pushChat(currentRoom, cm);
+      }
+    });
+
+    ws.on('close', (code, reason) => {
+        console.log(`Client disconnected. code=${code} reason=${reason ? reason.toString() : '<none>'}`);
+        if(currentRoom){ removePlayerFromRoom(currentRoom, player.id); }
+    });
+
+    ws.on('error', (err) => {
+        console.error('WebSocket error:', err && err.stack ? err.stack : err);
+    });
 });
 
 process.on('uncaughtException', err => { console.error('[Uncaught]', err); });
