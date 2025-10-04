@@ -807,9 +807,18 @@
 		// - If opened from file:// or running locally without host, fall back to ws://localhost:3000
 		const WS_URL = (() => {
 			// Use production server if on mental-math-trainer.shreesbacademy.tech
-			if (location.protocol === 'https:') return `wss://mental-math-trainer.shreesbacademy.tech/socket.io/`;
-			if (location.protocol === 'http:') return `ws://${location.hostname}:3000/socket.io/`;
-			return 'ws://localhost:3000/socket.io/';
+			if (location.hostname === 'mental-math-trainer.shreesbacademy.tech') {
+				return 'wss://mental-math-trainer.shreesbacademy.tech';
+			}
+			// For local development or other deployments
+			if (location.protocol === 'https:') {
+				return `wss://${location.hostname}:3000`;
+			}
+			if (location.protocol === 'http:') {
+				return `ws://${location.hostname}:3000`;
+			}
+			// Fallback for file:// protocol
+			return 'ws://localhost:3000';
 		})();
 
 		let wsSendQueue = [];
@@ -872,10 +881,10 @@
 				e.preventDefault();
 				const v = mpChatInput.value.trim();
 				if (!v) return;
-				console.debug('[chat] send', v);
-				// optimistic append (will be duplicated when server echoes; we tag pending)
-				appendChatMessage({ name: mpName.value || 'You', text: v, ts: Date.now(), _pending: true });
-				send('chat', { text: v });
+				const tempId = `temp_${Date.now()}_${Math.random()}`;
+				// optimistic append
+				appendChatMessage({ name: mpName.value || 'You', text: v, ts: Date.now(), _pending: true, tempId });
+				send('chat', { text: v, tempId });
 				mpChatInput.value = '';
 			});
 		}
@@ -955,22 +964,34 @@
 		function updateLeaderboard(lb) { if (!lb || !mpLeaderboard) return; mpLeaderboard.innerHTML = lb.map((p, i) => `<div style="display:flex; justify-content:space-between; gap:.5rem;"><span>${i + 1}. ${escapeHtml(p.name)}</span><span>${p.score}</span></div>`).join('') || '<em style="opacity:.6;">Waiting for players…</em>'; }
 		function appendChatMessage(msg, history = false) {
 			if (!msg) return;
-			console.debug('[chat] recv/append', msg);
 			if (!mpChatLog) return;
+
+			// If we receive a message with a tempId, try to find and update the optimistic one
+			if (msg.tempId) {
+				const pendingMsg = mpChatLog.querySelector(`[data-temp-id="${msg.tempId}"]`);
+				if (pendingMsg) {
+					pendingMsg.dataset.msgId = msg.id; // Update with the real ID from server
+					// Remove the "(sending)" note
+					const sendingIndicator = pendingMsg.querySelector('em');
+					if (sendingIndicator) sendingIndicator.remove();
+					return; // Message is now confirmed, no need to re-append
+				}
+			}
+
 			const atBottom = mpChatLog.scrollTop + mpChatLog.clientHeight >= mpChatLog.scrollHeight - 4;
 			if (mpChatLog.firstElementChild && mpChatLog.firstElementChild.tagName === 'EM') mpChatLog.innerHTML = '';
+
 			const div = document.createElement('div');
 			const ts = new Date(msg.ts || Date.now()); const hh = String(ts.getHours()).padStart(2, '0'); const mm = String(ts.getMinutes()).padStart(2, '0');
 			div.style.padding = '.18rem 0';
-			div.dataset.msgId = msg.id || '';
+
+			if (msg.tempId) div.dataset.tempId = msg.tempId;
+			if (msg.id) div.dataset.msgId = msg.id;
+
 			div.innerHTML = `<span style="opacity:.45; font-size:.65rem;">${hh}:${mm}</span> <strong style="font-weight:600;">${escapeHtml(msg.name || '')}</strong>: <span>${escapeHtml(msg.text || '')}</span>${msg._pending ? ' <em style=\"opacity:.4;\">(sending)</em>' : ''}`;
 			mpChatLog.appendChild(div);
+
 			if (atBottom) mpChatLog.scrollTop = mpChatLog.scrollHeight;
-			// If this is a definitive server message matching a prior pending, remove pending flag
-			if (msg.id) {
-				const pendings = [...mpChatLog.children].filter(el => el.dataset.msgId === '' && /\(sending\)/.test(el.textContent) && el.textContent.includes(msg.text));
-				pendings.forEach(p => p.remove());
-			}
 		}
 		function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' }[c])); }
 

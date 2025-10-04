@@ -8,7 +8,7 @@ import https from 'https';
 const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6); // avoids confusing chars
 // ---- WebSocket Server Setup ----
 let WSS;
-WSS = new WebSocketServer({ port: 3000, host: '127.0.0.1' });
+WSS = new WebSocketServer({ port: 3000 });
 // ---- Data Structures ----
 const rooms = new Map(); // code -> Room
 
@@ -240,7 +240,7 @@ WSS.on('connection', (ws, req) => {
         const now = Date.now();
     if(now - player.lastChatTs < 250) return; // relaxed rate limit (250ms)
     player.lastChatTs = now;
-    const cm = { id: nanoid(), playerId: player.id, name: player.name, text, ts: now };
+    const cm = { id: nanoid(), tempId: msg.tempId, playerId: player.id, name: player.name, text, ts: now };
     console.log(`[chat] ${currentRoom.code} ${player.name}:`, text);
     pushChat(currentRoom, cm);
       }
